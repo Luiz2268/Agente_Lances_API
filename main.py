@@ -346,13 +346,13 @@ async def s2gpr_disconnect():
     "/s2gpr/quotations",
     dependencies=[Depends(require_token)],
 )
-async def s2gpr_quotations():
+async def s2gpr_quotations(mine: bool = True, status: str | None = None):
     """
     Descoberta somente leitura da área de cotações na sessão autenticada.
     Não envia propostas, lances ou formulários.
     """
     try:
-        return await s2gpr_browser.quotations()
+        return await s2gpr_browser.quotations(mine=mine, status=status)
     except Exception:
         raise HTTPException(
             status_code=500,
