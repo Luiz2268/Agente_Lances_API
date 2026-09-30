@@ -153,6 +153,46 @@ class S2GPRBrowser:
             "url": self.page.url if self.page else None,
         }
 
+    async def _open_quotations_search(self):
+        """Navigate from the authenticated home to the quotation search page."""
+        markers = ("objeto da cotação", "objeto da cotacao", "só cotações que participo", "so cotacoes que participo")
+        body = await self._safe_body_text()
+        if any(marker in body for marker in markers):
+            return True
+
+        # JSF/Seam menus may use links, buttons or JavaScript onclick handlers.
+        candidates = self.page.locator('a, button, input[type="button"], input[type="submit"]')
+        for i in range(await candidates.count()):
+            item = candidates.nth(i)
+            try:
+                label = " ".join(filter(None, [
+                    (await item.inner_text()).strip(),
+                    (await item.get_attribute("value") or "").strip(),
+                    (await item.get_attribute("title") or "").strip(),
+                ])).lower()
+                href = (await item.get_attribute("href") or "").lower()
+                onclick = (await item.get_attribute("onclick") or "").lower()
+                haystack = f"{label} {href} {onclick}"
+                if not any(word in haystack for word in ("cotaç", "cotac", "coep")):
+                    continue
+                if any(word in haystack for word in ("proposta", "lance", "excluir", "participar")):
+                    continue
+                await item.click(timeout=5000)
+                try:
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=12000)
+                except Exception:
+                    pass
+                await self.page.wait_for_timeout(1200)
+                body = await self._safe_body_text()
+                if any(marker in body for marker in markers) or "nº coep" in body or "n° coep" in body:
+                    return True
+            except Exception:
+                continue
+
+        # Some JSF menus expose quotation entries only after opening a parent menu.
+        body = await self._safe_body_text()
+        return any(marker in body for marker in markers) or "nº coep" in body or "n° coep" in body
+
     async def quotations(self, mine: bool = True, status: str | None = None):
         """Read-only extraction of the authenticated S2GPR quotations table."""
         if not self.connected or not self.page:
@@ -163,79 +203,85 @@ class S2GPRBrowser:
             self.status = "session_expired"
             return {"ok": False, "status": self.status, "items": []}
 
-        # Locate the quotations/search page from the authenticated session.
-        body = await self._safe_body_text()
-        if not ("nº coep" in body or "n° coep" in body or "objeto da cotação" in body):
-            candidates = self.page.locator("a")
-            for i in range(await candidates.count()):
-                link = candidates.nth(i)
-                try:
-                    label = " ".join((await link.inner_text()).split()).lower()
-                    if "cotaç" in label or "cotac" in label:
-                        await link.click(timeout=5000)
-                        try:
-                            await self.page.wait_for_load_state("domcontentloaded", timeout=15000)
-                        except Exception:
-                            pass
-                        await self.page.wait_for_timeout(1200)
-                        body = await self._safe_body_text()
-                        if "objeto da cotação" in body or "coep" in body:
-                            break
-                except Exception:
-                    continue
+        if not await self._open_quotations_search():
+            return {
+                "ok": False,
+                "status": "quotations_page_not_found",
+                "url": self.page.url,
+                "items": [],
+            }
 
-        # Optional filters. We only interact with search controls; never proposal/action controls.
+        # Optional filters. Search controls only; never proposal/action controls.
         if mine:
             try:
                 labels = self.page.locator("label")
                 for i in range(await labels.count()):
                     label = labels.nth(i)
-                    text = (await label.inner_text()).lower()
-                    if "só cotações que participo" in text or "so cotacoes que participo" in text:
+                    label_text = (await label.inner_text()).lower()
+                    if "cotações que participo" in label_text or "cotacoes que participo" in label_text:
                         target = await label.get_attribute("for")
-                        checkbox = self.page.locator(f'#{target}') if target else label.locator('input[type="checkbox"]')
+                        checkbox = self.page.locator(f'[id="{target}"]') if target else label.locator('input[type="checkbox"]')
                         if await checkbox.count() and not await checkbox.first.is_checked():
                             await checkbox.first.check()
                         break
+                else:
+                    checkboxes = self.page.locator('input[type="checkbox"]')
+                    for i in range(await checkboxes.count()):
+                        cb = checkboxes.nth(i)
+                        meta = " ".join(filter(None, [
+                            await cb.get_attribute("id"),
+                            await cb.get_attribute("name"),
+                            await cb.get_attribute("title"),
+                        ])).lower()
+                        if "particip" in meta and not await cb.is_checked():
+                            await cb.check()
+                            break
             except Exception:
                 pass
 
         if status:
             try:
                 selects = self.page.locator("select")
+                wanted = status.replace("_", " ").lower()
                 for i in range(await selects.count()):
                     select = selects.nth(i)
-                    options = [x.lower() for x in await select.locator("option").all_inner_texts()]
-                    if any("recebendo propostas" in x for x in options):
-                        wanted = status.replace("_", " ").lower()
-                        for opt in await select.locator("option").all():
-                            txt = (await opt.inner_text()).strip()
-                            if wanted in txt.lower():
-                                value = await opt.get_attribute("value")
-                                if value is not None:
-                                    await select.select_option(value=value)
-                                break
-                        break
+                    options = select.locator("option")
+                    for j in range(await options.count()):
+                        opt = options.nth(j)
+                        txt = (await opt.inner_text()).strip()
+                        if wanted in txt.lower():
+                            value = await opt.get_attribute("value")
+                            if value is not None:
+                                await select.select_option(value=value)
+                            raise StopAsyncIteration
+            except StopAsyncIteration:
+                pass
             except Exception:
                 pass
 
-        # Execute only the search action if present.
+        # Execute only the search action.
         try:
-            search = self.page.get_by_text("Pesquisar", exact=True).first
+            search = self.page.locator(
+                'input[value="Pesquisar"], input[value*="Pesquisar"], '
+                'button:has-text("Pesquisar"), a:has-text("Pesquisar")'
+            ).first
             if await search.count() and await search.is_visible():
                 await search.click(timeout=5000)
+                try:
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=12000)
+                except Exception:
+                    pass
                 await self.page.wait_for_timeout(1500)
         except Exception:
             pass
 
-        # Find the result table by its known S2GPR headers.
         tables = self.page.locator("table")
         result_table = None
         for i in range(await tables.count()):
             table = tables.nth(i)
             try:
-                text = (await table.inner_text()).lower()
-                if "coep" in text and ("objeto da cotação" in text or "objeto da cotacao" in text):
+                table_text = (await table.inner_text()).lower()
+                if "coep" in table_text and ("objeto da cotação" in table_text or "objeto da cotacao" in table_text):
                     result_table = table
                     break
             except Exception:
@@ -252,19 +298,23 @@ class S2GPRBrowser:
         rows = result_table.locator("tr")
         items = []
         for i in range(await rows.count()):
-            row = rows.nth(i)
-            cells = row.locator("td")
+            cells = rows.nth(i).locator("td")
             count = await cells.count()
             if count < 6:
                 continue
             values = [" ".join((await cells.nth(j).inner_text()).split()) for j in range(count)]
-            # S2GPR currently includes selection/action cells before the business columns.
-            coep_index = next((j for j, v in enumerate(values) if "/" in v and any(ch.isdigit() for ch in v)), None)
+            coep_index = next(
+                (j for j, value in enumerate(values)
+                 if "/" in value and any(ch.isdigit() for ch in value)),
+                None,
+            )
             if coep_index is None:
                 continue
+
             def val(offset):
                 idx = coep_index + offset
                 return values[idx] if idx < len(values) else None
+
             items.append({
                 "coep": val(0),
                 "alert": val(1),
