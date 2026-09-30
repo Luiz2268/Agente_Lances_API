@@ -153,36 +153,137 @@ class S2GPRBrowser:
             "url": self.page.url if self.page else None,
         }
 
-    async def quotations(self):
-        """Read-only discovery of quotation links/items from an authenticated S2GPR page."""
+    async def quotations(self, mine: bool = True, status: str | None = None):
+        """Read-only extraction of the authenticated S2GPR quotations table."""
         if not self.connected or not self.page:
             return {"ok": False, "status": "not_authenticated", "items": []}
 
-        body = await self._safe_body_text()
         if await self._login_form_visible():
             self.connected = False
             self.status = "session_expired"
             return {"ok": False, "status": self.status, "items": []}
 
-        # Conservative discovery only: do not click or submit anything.
-        links = await self.page.locator("a").all()
-        items = []
-        for link in links:
+        # Locate the quotations/search page from the authenticated session.
+        body = await self._safe_body_text()
+        if not ("nº coep" in body or "n° coep" in body or "objeto da cotação" in body):
+            candidates = self.page.locator("a")
+            for i in range(await candidates.count()):
+                link = candidates.nth(i)
+                try:
+                    label = " ".join((await link.inner_text()).split()).lower()
+                    if "cotaç" in label or "cotac" in label:
+                        await link.click(timeout=5000)
+                        try:
+                            await self.page.wait_for_load_state("domcontentloaded", timeout=15000)
+                        except Exception:
+                            pass
+                        await self.page.wait_for_timeout(1200)
+                        body = await self._safe_body_text()
+                        if "objeto da cotação" in body or "coep" in body:
+                            break
+                except Exception:
+                    continue
+
+        # Optional filters. We only interact with search controls; never proposal/action controls.
+        if mine:
             try:
-                text = " ".join((await link.inner_text()).split())
-                href = await link.get_attribute("href")
-                lower = text.lower()
-                if text and any(k in lower for k in ["cotação", "cotacao", "disputa"]):
-                    items.append({"label": text[:200], "href": href})
+                labels = self.page.locator("label")
+                for i in range(await labels.count()):
+                    label = labels.nth(i)
+                    text = (await label.inner_text()).lower()
+                    if "só cotações que participo" in text or "so cotacoes que participo" in text:
+                        target = await label.get_attribute("for")
+                        checkbox = self.page.locator(f'#{target}') if target else label.locator('input[type="checkbox"]')
+                        if await checkbox.count() and not await checkbox.first.is_checked():
+                            await checkbox.first.check()
+                        break
+            except Exception:
+                pass
+
+        if status:
+            try:
+                selects = self.page.locator("select")
+                for i in range(await selects.count()):
+                    select = selects.nth(i)
+                    options = [x.lower() for x in await select.locator("option").all_inner_texts()]
+                    if any("recebendo propostas" in x for x in options):
+                        wanted = status.replace("_", " ").lower()
+                        for opt in await select.locator("option").all():
+                            txt = (await opt.inner_text()).strip()
+                            if wanted in txt.lower():
+                                value = await opt.get_attribute("value")
+                                if value is not None:
+                                    await select.select_option(value=value)
+                                break
+                        break
+            except Exception:
+                pass
+
+        # Execute only the search action if present.
+        try:
+            search = self.page.get_by_text("Pesquisar", exact=True).first
+            if await search.count() and await search.is_visible():
+                await search.click(timeout=5000)
+                await self.page.wait_for_timeout(1500)
+        except Exception:
+            pass
+
+        # Find the result table by its known S2GPR headers.
+        tables = self.page.locator("table")
+        result_table = None
+        for i in range(await tables.count()):
+            table = tables.nth(i)
+            try:
+                text = (await table.inner_text()).lower()
+                if "coep" in text and ("objeto da cotação" in text or "objeto da cotacao" in text):
+                    result_table = table
+                    break
             except Exception:
                 continue
+
+        if result_table is None:
+            return {
+                "ok": False,
+                "status": "quotations_table_not_found",
+                "url": self.page.url,
+                "items": [],
+            }
+
+        rows = result_table.locator("tr")
+        items = []
+        for i in range(await rows.count()):
+            row = rows.nth(i)
+            cells = row.locator("td")
+            count = await cells.count()
+            if count < 6:
+                continue
+            values = [" ".join((await cells.nth(j).inner_text()).split()) for j in range(count)]
+            # S2GPR currently includes selection/action cells before the business columns.
+            coep_index = next((j for j, v in enumerate(values) if "/" in v and any(ch.isdigit() for ch in v)), None)
+            if coep_index is None:
+                continue
+            def val(offset):
+                idx = coep_index + offset
+                return values[idx] if idx < len(values) else None
+            items.append({
+                "coep": val(0),
+                "alert": val(1),
+                "status": val(2),
+                "viproc": val(3),
+                "object": val(4),
+                "term_promoter_delivery": val(5),
+                "acquisition_type": val(6),
+                "reception_opening": val(7),
+            })
 
         return {
             "ok": True,
             "status": "authenticated",
+            "mine": mine,
+            "filter_status": status,
             "url": self.page.url,
-            "items": items[:100],
-            "page_has_quotation_text": ("cotação" in body or "cotacao" in body),
+            "count": len(items),
+            "items": items[:200],
         }
 
     async def disconnect(self):
