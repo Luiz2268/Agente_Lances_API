@@ -187,6 +187,52 @@ class S2GPRBrowser:
         except Exception:
             return None
 
+    async def workflow_status(self):
+        """End-to-end, read-only operational status for the S2GPR robot."""
+        steps = {
+            "browser": bool(self.browser and self.page),
+            "portal": False,
+            "authenticated": bool(self.connected),
+            "quotations_page": False,
+            "quotations_read": False,
+        }
+        result = {
+            "ok": False,
+            "status": self.status,
+            "reason": self.last_error_code,
+            "steps": steps,
+            "quotation_count": 0,
+        }
+        if not self.page:
+            return result
+        try:
+            steps["portal"] = "s2gpr.sefaz.ce.gov.br" in (self.page.url or "")
+            if await self._login_form_visible():
+                self.connected = False
+                self.status = "session_expired"
+                result["status"] = self.status
+                result["reason"] = "login_form_visible"
+                steps["authenticated"] = False
+                return result
+            steps["authenticated"] = bool(self.connected)
+            if not self.connected:
+                return result
+
+            quotation_result = await self.quotations(mine=True)
+            steps["quotations_page"] = quotation_result.get("status") != "quotations_page_not_found"
+            steps["quotations_read"] = bool(quotation_result.get("ok"))
+            result["quotation_count"] = int(quotation_result.get("count", 0) or 0)
+            result["status"] = quotation_result.get("status", self.status)
+            result["reason"] = quotation_result.get("reason")
+            result["ok"] = bool(quotation_result.get("ok"))
+            if "diagnostic" in quotation_result:
+                result["diagnostic"] = quotation_result["diagnostic"]
+            return result
+        except Exception:
+            result["status"] = "workflow_error"
+            result["reason"] = "workflow_check_failed"
+            return result
+
     async def navigation_diagnostic(self):
         """Safe, read-only snapshot of menu/navigation controls; never returns page HTML."""
         if not self.connected or not self.page:
