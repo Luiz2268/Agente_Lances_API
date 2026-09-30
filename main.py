@@ -345,6 +345,22 @@ async def s2gpr_disconnect():
 
 
 @app.get(
+    "/s2gpr/workflow-status",
+    dependencies=[Depends(require_token)],
+)
+async def s2gpr_workflow_status():
+    """Status ponta a ponta do robô: portal, sessão e leitura de cotações."""
+    try:
+        return await s2gpr_browser.workflow_status()
+    except Exception:
+        logger.exception("S2GPR_WORKFLOW unexpected_connector_error")
+        raise HTTPException(
+            status_code=500,
+            detail="Falha técnica ao verificar o fluxo S2GPR.",
+        )
+
+
+@app.get(
     "/s2gpr/quotations",
     dependencies=[Depends(require_token)],
 )
