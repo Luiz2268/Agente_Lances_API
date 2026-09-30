@@ -80,7 +80,7 @@ def require_token(
 
     return True
 
-
+def response(message: str) -> ActionResponse:
 def response(message: str) -> ActionResponse:
     return ActionResponse(
         ok=True,
