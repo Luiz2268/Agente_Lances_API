@@ -253,77 +253,93 @@ class S2GPRBrowser:
         }
 
     async def _open_quotations_search(self):
-        """Open the authenticated quotation search page in read-only mode."""
+        """Open quotation search using the authenticated JSF/Seam navigation."""
         markers = (
-            "objeto da cotação",
-            "objeto da cotacao",
-            "só cotações que participo",
-            "so cotacoes que participo",
-            "nº coep",
-            "n° coep",
+            "objeto da cotação", "objeto da cotacao",
+            "só cotações que participo", "so cotacoes que participo",
+            "nº coep", "n° coep",
         )
 
-        body = await self._safe_body_text()
-        if any(marker in body for marker in markers):
+        async def page_has_markers():
+            for frame in self.page.frames:
+                try:
+                    body = (await frame.locator("body").inner_text()).lower()
+                    if any(marker in body for marker in markers):
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        if await page_has_markers():
             return True
 
-        # The authenticated S2GPR session can open the official quotation
-        # search route directly. This avoids depending on JSF menu rendering.
+        # First try the official route. Some S2GPR roles redirect this to home.
         try:
             await self.page.goto(
                 S2GPR_QUOTATIONS_URL,
                 wait_until="domcontentloaded",
                 timeout=60000,
             )
-            await self.page.wait_for_timeout(1800)
-
+            await self.page.wait_for_timeout(1500)
             if await self._login_form_visible():
                 self.connected = False
                 self.status = "session_expired"
                 self.last_error_code = "session_expired_on_quotations"
                 return False
-
-            body = await self._safe_body_text()
-            if any(marker in body for marker in markers):
+            if await page_has_markers():
                 return True
         except Exception:
             pass
 
-        # Fallback for portal changes: inspect rendered controls and JSF actions.
-        candidates = self.page.locator(
-            'a, button, input[type="button"], input[type="submit"]'
-        )
-        for i in range(await candidates.count()):
-            item = candidates.nth(i)
-            try:
-                label = " ".join(filter(None, [
-                    (await item.inner_text()).strip(),
-                    (await item.get_attribute("value") or "").strip(),
-                    (await item.get_attribute("title") or "").strip(),
-                ])).lower()
-                href = (await item.get_attribute("href") or "").lower()
-                onclick = (await item.get_attribute("onclick") or "").lower()
-                haystack = f"{label} {href} {onclick}"
+        # S2GPR renders navigation in frames. Search every authenticated frame,
+        # opening parent menu entries before looking for the quotation child.
+        safe_words = ("cotaç", "cotac", "coep", "consulta", "pesquis")
+        forbidden = ("lance", "excluir", "enviar proposta", "participar")
 
-                if not any(word in haystack for word in ("cotaç", "cotac", "coep")):
-                    continue
-                if any(word in haystack for word in ("lance", "excluir proposta", "participar")):
-                    continue
-
-                await item.click(timeout=5000)
+        for _round in range(3):
+            for frame in list(self.page.frames):
                 try:
-                    await self.page.wait_for_load_state(
-                        "domcontentloaded", timeout=12000
+                    candidates = frame.locator(
+                        'a, button, input[type="button"], input[type="submit"]'
                     )
-                except Exception:
-                    pass
-                await self.page.wait_for_timeout(1200)
+                    total = min(await candidates.count(), 300)
+                    for i in range(total):
+                        item = candidates.nth(i)
+                        try:
+                            label = " ".join(filter(None, [
+                                (await item.inner_text()).strip(),
+                                (await item.get_attribute("value") or "").strip(),
+                                (await item.get_attribute("title") or "").strip(),
+                                (await item.get_attribute("aria-label") or "").strip(),
+                            ])).lower()
+                            href = (await item.get_attribute("href") or "").lower()
+                            item_id = (await item.get_attribute("id") or "").lower()
+                            item_name = (await item.get_attribute("name") or "").lower()
+                            haystack = f"{label} {href} {item_id} {item_name}"
+                            if not any(word in haystack for word in safe_words):
+                                continue
+                            if any(word in haystack for word in forbidden):
+                                continue
+                            if not await item.is_visible():
+                                continue
 
-                body = await self._safe_body_text()
-                if any(marker in body for marker in markers):
-                    return True
-            except Exception:
-                continue
+                            await item.click(timeout=5000)
+                            try:
+                                await self.page.wait_for_load_state(
+                                    "domcontentloaded", timeout=10000
+                                )
+                            except Exception:
+                                pass
+                            await self.page.wait_for_timeout(1000)
+                            if await page_has_markers():
+                                return True
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            # Parent menus can reveal new child controls without navigation.
+            await self.page.wait_for_timeout(700)
 
         return False
 
