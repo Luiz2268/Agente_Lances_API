@@ -1,3 +1,5 @@
+import re
+from urllib.parse import urlsplit
 from playwright.async_api import async_playwright
 
 S2GPR_LOGIN_URL = (
@@ -158,6 +160,98 @@ class S2GPRBrowser:
             "url": self.page.url if self.page else None,
         }
 
+    @staticmethod
+    def _safe_nav_value(value):
+        """Return only non-sensitive navigation metadata."""
+        if not value:
+            return None
+        value = " ".join(str(value).split())[:160]
+        low = value.lower()
+        if any(secret in low for secret in (
+            "senha", "password", "token", "authorization", "cpf", "usuário:", "usuario:"
+        )):
+            return None
+        if re.search(r"\\b\\d{3}\\.?\\d{3}\\.?\\d{3}-?\\d{2}\\b", value):
+            return None
+        return value or None
+
+    @staticmethod
+    def _safe_url_path(value):
+        if not value:
+            return None
+        try:
+            if str(value).lower().startswith("javascript:"):
+                return None
+            parsed = urlsplit(str(value))
+            return parsed.path or None
+        except Exception:
+            return None
+
+    async def navigation_diagnostic(self):
+        """Safe, read-only snapshot of menu/navigation controls; never returns page HTML."""
+        if not self.connected or not self.page:
+            return {"ok": False, "status": "not_authenticated", "frames": []}
+
+        keywords = (
+            "cota", "consulta", "pesquis", "aquisi", "fornecedor",
+            "negocia", "proposta", "process", "menu", "coep"
+        )
+        frames_out = []
+
+        for frame in self.page.frames:
+            controls = []
+            try:
+                locator = frame.locator(
+                    'a, button, input[type="button"], input[type="submit"]'
+                )
+                total = min(await locator.count(), 250)
+                for i in range(total):
+                    item = locator.nth(i)
+                    try:
+                        label = " ".join(filter(None, [
+                            (await item.inner_text()).strip(),
+                            (await item.get_attribute("value") or "").strip(),
+                            (await item.get_attribute("title") or "").strip(),
+                            (await item.get_attribute("aria-label") or "").strip(),
+                        ]))
+                        safe_label = self._safe_nav_value(label)
+                        href = await item.get_attribute("href")
+                        element_id = self._safe_nav_value(await item.get_attribute("id"))
+                        element_name = self._safe_nav_value(await item.get_attribute("name"))
+                        onclick = await item.get_attribute("onclick")
+                        haystack = " ".join(filter(None, [
+                            safe_label, element_id, element_name,
+                            self._safe_url_path(href),
+                        ])).lower()
+                        if not any(word in haystack for word in keywords):
+                            continue
+                        tag = await item.evaluate("(e) => e.tagName.toLowerCase()")
+                        controls.append({
+                            "tag": tag,
+                            "text": safe_label,
+                            "id": element_id,
+                            "name": element_name,
+                            "href_path": self._safe_url_path(href),
+                            "has_onclick": bool(onclick),
+                        })
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            frames_out.append({
+                "url_path": self._safe_url_path(frame.url),
+                "controls": controls[:80],
+            })
+
+        return {
+            "ok": True,
+            "status": self.status,
+            "page_path": self._safe_url_path(self.page.url),
+            "frame_count": len(frames_out),
+            "frames": frames_out,
+        }
+
     async def _open_quotations_search(self):
         """Open the authenticated quotation search page in read-only mode."""
         markers = (
@@ -244,11 +338,13 @@ class S2GPRBrowser:
             return {"ok": False, "status": self.status, "items": []}
 
         if not await self._open_quotations_search():
+            diagnostic = await self.navigation_diagnostic()
             return {
                 "ok": False,
                 "status": "quotations_page_not_found",
                 "url": self.page.url,
                 "items": [],
+                "diagnostic": diagnostic,
             }
 
         # Optional filters. Search controls only; never proposal/action controls.
