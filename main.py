@@ -78,7 +78,10 @@ def require_token(
             detail="Não autorizado.",
         )
 
-  @app.get("/debug/token")
+    return True
+
+
+@app.get("/debug/token")
 def debug_token(
     authorization: str | None = Header(default=None)
 ):
@@ -108,6 +111,8 @@ def response(message: str) -> ActionResponse:
         status=StatusResponse(**agent.get_state()),
         message=message,
     )
+
+
 @app.get("/health")
 def health():
     return {
