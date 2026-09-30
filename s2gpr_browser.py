@@ -389,6 +389,25 @@ class S2GPRBrowser:
 
         return False
 
+    async def _quotations_frame(self):
+        """Locate the frame that actually owns the S2GPR quotation form/table."""
+        markers = (
+            "objeto da cotação", "objeto da cotacao",
+            "só cotações que participo", "so cotacoes que participo",
+            "nº coep", "n° coep", "viproc",
+        )
+        best = None
+        best_score = 0
+        for frame in list(self.page.frames):
+            try:
+                body = (await frame.locator("body").inner_text()).lower()
+                score = sum(1 for marker in markers if marker in body)
+                if score > best_score:
+                    best, best_score = frame, score
+            except Exception:
+                continue
+        return best if best_score >= 2 else None
+
     async def quotations(self, mine: bool = True, status: str | None = None):
         """Read-only extraction of the authenticated S2GPR quotations table."""
         if not self.connected or not self.page:
@@ -409,38 +428,55 @@ class S2GPRBrowser:
                 "diagnostic": diagnostic,
             }
 
-        # Optional filters. Search controls only; never proposal/action controls.
+        frame = await self._quotations_frame()
+        if frame is None:
+            return {
+                "ok": False,
+                "status": "quotations_frame_not_found",
+                "url": self.page.url,
+                "items": [],
+                "diagnostic": await self.navigation_diagnostic(),
+            }
+
+        # Apply "Só cotações que participo" in the frame that owns the JSF form.
         if mine:
             try:
-                labels = self.page.locator("label")
+                found = False
+                labels = frame.locator("label")
                 for i in range(await labels.count()):
                     label = labels.nth(i)
                     label_text = (await label.inner_text()).lower()
                     if "cotações que participo" in label_text or "cotacoes que participo" in label_text:
                         target = await label.get_attribute("for")
-                        checkbox = self.page.locator(f'[id="{target}"]') if target else label.locator('input[type="checkbox"]')
-                        if await checkbox.count() and not await checkbox.first.is_checked():
-                            await checkbox.first.check()
-                        break
-                else:
-                    checkboxes = self.page.locator('input[type="checkbox"]')
+                        checkbox = frame.locator(f'[id="{target}"]') if target else label.locator('input[type="checkbox"]')
+                        if await checkbox.count():
+                            cb = checkbox.first
+                            if not await cb.is_checked():
+                                await cb.check()
+                            found = True
+                            break
+                if not found:
+                    checkboxes = frame.locator('input[type="checkbox"]')
                     for i in range(await checkboxes.count()):
                         cb = checkboxes.nth(i)
                         meta = " ".join(filter(None, [
                             await cb.get_attribute("id"),
                             await cb.get_attribute("name"),
                             await cb.get_attribute("title"),
+                            await cb.get_attribute("aria-label"),
                         ])).lower()
-                        if "particip" in meta and not await cb.is_checked():
-                            await cb.check()
+                        if "particip" in meta:
+                            if not await cb.is_checked():
+                                await cb.check()
                             break
             except Exception:
                 pass
 
         if status:
             try:
-                selects = self.page.locator("select")
                 wanted = status.replace("_", " ").lower()
+                selects = frame.locator("select")
+                selected = False
                 for i in range(await selects.count()):
                     select = selects.nth(i)
                     options = select.locator("option")
@@ -451,35 +487,39 @@ class S2GPRBrowser:
                             value = await opt.get_attribute("value")
                             if value is not None:
                                 await select.select_option(value=value)
-                            raise StopAsyncIteration
-            except StopAsyncIteration:
-                pass
+                                selected = True
+                            break
+                    if selected:
+                        break
             except Exception:
                 pass
 
-        # Execute only the search action.
+        # Execute only the Pesquisar action in the same quotation frame.
         try:
-            search = self.page.locator(
-                'input[value="Pesquisar"], input[value*="Pesquisar"], '
-                'button:has-text("Pesquisar"), a:has-text("Pesquisar")'
+            search = frame.locator(
+                'input[value*="Pesquisar" i], button:has-text("Pesquisar"), '
+                'a:has-text("Pesquisar")'
             ).first
             if await search.count() and await search.is_visible():
-                await search.click(timeout=5000)
-                try:
-                    await self.page.wait_for_load_state("domcontentloaded", timeout=12000)
-                except Exception:
-                    pass
-                await self.page.wait_for_timeout(1500)
+                await search.click(timeout=7000)
+                await self.page.wait_for_timeout(1800)
         except Exception:
             pass
 
-        tables = self.page.locator("table")
+        # JSF can refresh/recreate the frame after search; locate it again.
+        frame = await self._quotations_frame() or frame
+
         result_table = None
+        tables = frame.locator("table")
         for i in range(await tables.count()):
             table = tables.nth(i)
             try:
                 table_text = (await table.inner_text()).lower()
-                if "coep" in table_text and ("objeto da cotação" in table_text or "objeto da cotacao" in table_text):
+                if "coep" in table_text and (
+                    "objeto da cotação" in table_text
+                    or "objeto da cotacao" in table_text
+                    or "viproc" in table_text
+                ):
                     result_table = table
                     break
             except Exception:
@@ -491,7 +531,19 @@ class S2GPRBrowser:
                 "status": "quotations_table_not_found",
                 "url": self.page.url,
                 "items": [],
+                "diagnostic": await self.navigation_diagnostic(),
             }
+
+        # Read headers first so the parser follows the real government table layout.
+        headers = []
+        try:
+            ths = result_table.locator("th")
+            headers = [
+                " ".join((await ths.nth(i).inner_text()).split()).lower()
+                for i in range(await ths.count())
+            ]
+        except Exception:
+            headers = []
 
         rows = result_table.locator("tr")
         items = []
@@ -500,10 +552,17 @@ class S2GPRBrowser:
             count = await cells.count()
             if count < 6:
                 continue
-            values = [" ".join((await cells.nth(j).inner_text()).split()) for j in range(count)]
+            values = [
+                " ".join((await cells.nth(j).inner_text()).split())
+                for j in range(count)
+            ]
+
+            # The first cells may contain action icons. Anchor parsing on the COEP cell.
             coep_index = next(
-                (j for j, value in enumerate(values)
-                 if "/" in value and any(ch.isdigit() for ch in value)),
+                (
+                    j for j, value in enumerate(values)
+                    if re.search(r"\\d+\\s*/\\s*\\d{4}", value)
+                ),
                 None,
             )
             if coep_index is None:
@@ -511,7 +570,7 @@ class S2GPRBrowser:
 
             def val(offset):
                 idx = coep_index + offset
-                return values[idx] if idx < len(values) else None
+                return values[idx] if 0 <= idx < len(values) else None
 
             items.append({
                 "coep": val(0),
