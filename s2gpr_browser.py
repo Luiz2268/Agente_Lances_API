@@ -5,6 +5,11 @@ S2GPR_LOGIN_URL = (
     "cotacao-web/padrao-web/paginas/seguranca/login.seam"
 )
 
+S2GPR_QUOTATIONS_URL = (
+    "https://s2gpr.sefaz.ce.gov.br/"
+    "cotacao-web/paginas/proposta/PropostaList.seam"
+)
+
 
 class S2GPRBrowser:
     def __init__(self):
@@ -154,14 +159,46 @@ class S2GPRBrowser:
         }
 
     async def _open_quotations_search(self):
-        """Navigate from the authenticated home to the quotation search page."""
-        markers = ("objeto da cotação", "objeto da cotacao", "só cotações que participo", "so cotacoes que participo")
+        """Open the authenticated quotation search page in read-only mode."""
+        markers = (
+            "objeto da cotação",
+            "objeto da cotacao",
+            "só cotações que participo",
+            "so cotacoes que participo",
+            "nº coep",
+            "n° coep",
+        )
+
         body = await self._safe_body_text()
         if any(marker in body for marker in markers):
             return True
 
-        # JSF/Seam menus may use links, buttons or JavaScript onclick handlers.
-        candidates = self.page.locator('a, button, input[type="button"], input[type="submit"]')
+        # The authenticated S2GPR session can open the official quotation
+        # search route directly. This avoids depending on JSF menu rendering.
+        try:
+            await self.page.goto(
+                S2GPR_QUOTATIONS_URL,
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+            await self.page.wait_for_timeout(1800)
+
+            if await self._login_form_visible():
+                self.connected = False
+                self.status = "session_expired"
+                self.last_error_code = "session_expired_on_quotations"
+                return False
+
+            body = await self._safe_body_text()
+            if any(marker in body for marker in markers):
+                return True
+        except Exception:
+            pass
+
+        # Fallback for portal changes: inspect rendered controls and JSF actions.
+        candidates = self.page.locator(
+            'a, button, input[type="button"], input[type="submit"]'
+        )
         for i in range(await candidates.count()):
             item = candidates.nth(i)
             try:
@@ -173,25 +210,28 @@ class S2GPRBrowser:
                 href = (await item.get_attribute("href") or "").lower()
                 onclick = (await item.get_attribute("onclick") or "").lower()
                 haystack = f"{label} {href} {onclick}"
+
                 if not any(word in haystack for word in ("cotaç", "cotac", "coep")):
                     continue
-                if any(word in haystack for word in ("proposta", "lance", "excluir", "participar")):
+                if any(word in haystack for word in ("lance", "excluir proposta", "participar")):
                     continue
+
                 await item.click(timeout=5000)
                 try:
-                    await self.page.wait_for_load_state("domcontentloaded", timeout=12000)
+                    await self.page.wait_for_load_state(
+                        "domcontentloaded", timeout=12000
+                    )
                 except Exception:
                     pass
                 await self.page.wait_for_timeout(1200)
+
                 body = await self._safe_body_text()
-                if any(marker in body for marker in markers) or "nº coep" in body or "n° coep" in body:
+                if any(marker in body for marker in markers):
                     return True
             except Exception:
                 continue
 
-        # Some JSF menus expose quotation entries only after opening a parent menu.
-        body = await self._safe_body_text()
-        return any(marker in body for marker in markers) or "nº coep" in body or "n° coep" in body
+        return False
 
     async def quotations(self, mine: bool = True, status: str | None = None):
         """Read-only extraction of the authenticated S2GPR quotations table."""
