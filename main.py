@@ -2,8 +2,9 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
 from schemas import AgentConfig, StatusResponse, ActionResponse, LogEntry
@@ -32,7 +33,7 @@ LOVABLE_ORIGINS = [
 
 app = FastAPI(
     title="Agente de Lances S2GPR API",
-    version="1.1.0",
+    version="1.1.1",
     description=(
         "API de controle do Agente de Lances S2GPR. "
         "Simulação habilitada e conector de autenticação supervisionada."
@@ -58,8 +59,11 @@ class S2GPRCredentials(BaseModel):
     senha: str
 
 
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
 def require_token(
-    authorization: str | None = Header(default=None)
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)
 ):
     if DEV_NO_AUTH:
         return True
@@ -70,9 +74,11 @@ def require_token(
             detail="API_TOKEN não configurado no servidor.",
         )
 
-    expected = f"Bearer {API_TOKEN}"
-
-    if authorization != expected:
+    if (
+        credentials is None
+        or credentials.scheme.lower() != "bearer"
+        or credentials.credentials != API_TOKEN
+    ):
         raise HTTPException(
             status_code=401,
             detail="Não autorizado.",
@@ -81,27 +87,15 @@ def require_token(
     return True
 
 
-@app.get("/debug/token")
-def debug_token(
-    authorization: str | None = Header(default=None)
-):
-    expected = f"Bearer {API_TOKEN}" if API_TOKEN else None
-
+@app.get(
+    "/debug/token",
+    dependencies=[Depends(require_token)],
+)
+def debug_token():
     return {
         "api_token_configured": bool(API_TOKEN),
-        "received_authorization": bool(authorization),
-        "starts_with_bearer": (
-            authorization.startswith("Bearer ")
-            if authorization
-            else False
-        ),
-        "token_matches": authorization == expected,
+        "authorization_ok": True,
         "token_length_server": len(API_TOKEN),
-        "token_length_received": (
-            len(authorization.replace("Bearer ", "", 1))
-            if authorization
-            else 0
-        ),
     }
 
 
@@ -352,7 +346,7 @@ async def s2gpr_disconnect():
 def root():
     return {
         "name": "Agente de Lances S2GPR API",
-        "version": "1.1.0",
+        "version": "1.1.1",
         "mode": "simulacao",
         "browser_connector": True,
         "real_s2gpr_enabled": False,
