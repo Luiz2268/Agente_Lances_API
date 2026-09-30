@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -14,6 +15,8 @@ from s2gpr_browser import s2gpr_browser
 
 
 load_dotenv()
+
+logger = logging.getLogger("s2gpr")
 
 
 PORT = int(os.getenv("PORT", "8000"))
@@ -86,17 +89,6 @@ def require_token(
 
     return True
 
-
-@app.get(
-    "/debug/token",
-    dependencies=[Depends(require_token)],
-)
-def debug_token():
-    return {
-        "api_token_configured": bool(API_TOKEN),
-        "authorization_ok": True,
-        "token_length_server": len(API_TOKEN),
-    }
 
 
 def response(message: str) -> ActionResponse:
@@ -294,12 +286,20 @@ async def s2gpr_connect(
             senha=credentials.senha,
         )
 
+        # Safe operational log: never log credentials, tokens or raw portal HTML.
+        logger.info(
+            "S2GPR_CONNECT status=%s reason=%s connected=%s",
+            result.get("status"),
+            result.get("reason"),
+            result.get("connected"),
+        )
         return result
 
-    except Exception as exc:
+    except Exception:
+        logger.exception("S2GPR_CONNECT unexpected_connector_error")
         raise HTTPException(
             status_code=500,
-            detail=f"Falha ao conectar ao S2GPR: {str(exc)}",
+            detail="Falha técnica ao conectar ao S2GPR.",
         )
 
 
@@ -316,10 +316,11 @@ async def s2gpr_session():
     try:
         return await s2gpr_browser.session_status()
 
-    except Exception as exc:
+    except Exception:
+        logger.exception("S2GPR_SESSION unexpected_connector_error")
         raise HTTPException(
             status_code=500,
-            detail=f"Falha ao consultar sessão: {str(exc)}",
+            detail="Falha técnica ao consultar sessão S2GPR.",
         )
 
 
@@ -335,10 +336,11 @@ async def s2gpr_disconnect():
     try:
         return await s2gpr_browser.disconnect()
 
-    except Exception as exc:
+    except Exception:
+        logger.exception("S2GPR_DISCONNECT unexpected_connector_error")
         raise HTTPException(
             status_code=500,
-            detail=f"Falha ao desconectar: {str(exc)}",
+            detail="Falha técnica ao desconectar a sessão S2GPR.",
         )
 
 
