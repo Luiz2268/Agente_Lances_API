@@ -342,6 +342,24 @@ async def s2gpr_disconnect():
         )
 
 
+@app.get(
+    "/s2gpr/quotations",
+    dependencies=[Depends(require_token)],
+)
+async def s2gpr_quotations():
+    """
+    Descoberta somente leitura da área de cotações na sessão autenticada.
+    Não envia propostas, lances ou formulários.
+    """
+    try:
+        return await s2gpr_browser.quotations()
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Falha ao consultar cotações no S2GPR.",
+        )
+
+
 @app.get("/")
 def root():
     return {
