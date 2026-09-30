@@ -31,8 +31,9 @@ class S2GPRBrowser:
         )
 
         self.context = await self.browser.new_context(
-            viewport={"width": 1440, "height": 900}
-        )
+    viewport={"width": 1440, "height": 900},
+    ignore_https_errors=True,
+)
 
         self.page = await self.context.new_page()
 
