@@ -78,17 +78,36 @@ def require_token(
             detail="Não autorizado.",
         )
 
-    return True
+  @app.get("/debug/token")
+def debug_token(
+    authorization: str | None = Header(default=None)
+):
+    expected = f"Bearer {API_TOKEN}" if API_TOKEN else None
 
-def response(message: str) -> ActionResponse:
+    return {
+        "api_token_configured": bool(API_TOKEN),
+        "received_authorization": bool(authorization),
+        "starts_with_bearer": (
+            authorization.startswith("Bearer ")
+            if authorization
+            else False
+        ),
+        "token_matches": authorization == expected,
+        "token_length_server": len(API_TOKEN),
+        "token_length_received": (
+            len(authorization.replace("Bearer ", "", 1))
+            if authorization
+            else 0
+        ),
+    }
+
+
 def response(message: str) -> ActionResponse:
     return ActionResponse(
         ok=True,
         status=StatusResponse(**agent.get_state()),
         message=message,
     )
-
-
 @app.get("/health")
 def health():
     return {
