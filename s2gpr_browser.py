@@ -45,8 +45,11 @@ class S2GPRBrowser:
 
     async def _login_form_visible(self):
         try:
-            passwords = self.page.locator('input[type="password"]')
-            return await passwords.count() > 0 and await passwords.first.is_visible()
+            for frame in self.page.frames:
+                passwords = frame.locator('input[type="password"]')
+                if await passwords.count() > 0 and await passwords.first.is_visible():
+                    return True
+            return False
         except Exception:
             return False
 
@@ -389,6 +392,26 @@ class S2GPRBrowser:
 
         return False
 
+    async def _frame_snapshot(self):
+        """Safe structural snapshot used to diagnose the legacy JSF frames."""
+        out = []
+        for index, frame in enumerate(list(self.page.frames)):
+            try:
+                body = (await frame.locator("body").inner_text()).lower()
+                out.append({
+                    "index": index,
+                    "url_path": self._safe_url_path(frame.url),
+                    "has_coep": "coep" in body,
+                    "has_object": "objeto da cotação" in body or "objeto da cotacao" in body,
+                    "has_mine": "cotações que participo" in body or "cotacoes que participo" in body,
+                    "has_search": "pesquisar" in body,
+                    "table_count": await frame.locator("table").count(),
+                    "checkbox_count": await frame.locator('input[type="checkbox"]').count(),
+                })
+            except Exception:
+                continue
+        return out
+
     async def _quotations_frame(self):
         """Locate the frame that actually owns the S2GPR quotation form/table."""
         markers = (
@@ -436,6 +459,7 @@ class S2GPRBrowser:
                 "url": self.page.url,
                 "items": [],
                 "diagnostic": await self.navigation_diagnostic(),
+                "frame_snapshot": await self._frame_snapshot(),
             }
 
         # Apply "Só cotações que participo" in the frame that owns the JSF form.
@@ -532,6 +556,7 @@ class S2GPRBrowser:
                 "url": self.page.url,
                 "items": [],
                 "diagnostic": await self.navigation_diagnostic(),
+                "frame_snapshot": await self._frame_snapshot(),
             }
 
         # Read headers first so the parser follows the real government table layout.
